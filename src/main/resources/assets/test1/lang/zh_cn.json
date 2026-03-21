@@ -1,0 +1,14 @@
+{
+  "item.test1.stone_grappling_hook": "石质勾爪",
+  "item.test1.iron_grappling_hook": "铁质勾爪",
+  "item.test1.gold_grappling_hook": "金质勾爪",
+  "item.test1.diamond_grappling_hook": "钻石质勾爪",
+  "item.test1.netherite_grappling_hook": "下界合金勾爪",
+  "itemGroup.test1.grappling_hook": "勾爪模组",
+  "advancements.test1.root.title": "入门：获得第一把勾爪",
+  "advancements.test1.root.description": "获得石质勾爪，开启你的牵引之旅。",
+  "advancements.test1.netherite.title": "极限牵引：获得下界合金勾爪",
+  "advancements.test1.netherite.description": "打造顶级下界合金勾爪，征服更远的地形。",
+  "key.zhuoers-mod.use_grappling_hook": "使用勾爪",
+  "key.categories.zhuoers-mod": "勾爪模组"
+}

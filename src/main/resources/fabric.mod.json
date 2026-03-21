@@ -1,0 +1,41 @@
+{
+	"schemaVersion": 1,
+	"id": "zhuoers-mod",
+	"version": "${version}",
+	"name": "zhuoers-Mod",
+	"description": "This is an example description! Tell everyone what your mod is about!",
+	"authors": [
+		"Me!"
+	],
+	"contact": {
+		"homepage": "https://fabricmc.net/",
+		"sources": "https://github.com/FabricMC/fabric-example-mod"
+	},
+	"license": "CC0-1.0",
+	"icon": "assets/zhuoers-mod/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"test1.example.ZhuoersMod"
+		],
+		"client": [
+			"test1.example.ZhuoersModClient"
+		],
+		"fabric-datagen": [
+			"test1.example.ZhuoersModDataGenerator"
+		]
+	},
+	"mixins": [
+		"zhuoers-mod.mixins.json",
+		{
+			"config": "zhuoers-mod.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.18.4",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}

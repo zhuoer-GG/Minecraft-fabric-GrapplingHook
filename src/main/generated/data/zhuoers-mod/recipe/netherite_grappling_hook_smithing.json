@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:smithing_transform",
+  "addition": "minecraft:netherite_ingot",
+  "base": "test1:diamond_grappling_hook",
+  "result": {
+    "id": "test1:netherite_grappling_hook"
+  },
+  "template": "minecraft:netherite_upgrade_smithing_template"
+}

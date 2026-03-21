@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "equipment",
+  "key": {
+    "C": "minecraft:iron_chain",
+    "M": "minecraft:gold_ingot",
+    "S": "minecraft:slime_ball"
+  },
+  "pattern": [
+    "S",
+    "M",
+    "C"
+  ],
+  "result": {
+    "count": 1,
+    "id": "test1:gold_grappling_hook"
+  }
+}

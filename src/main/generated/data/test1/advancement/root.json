@@ -1,0 +1,33 @@
+{
+  "criteria": {
+    "has_stone_grappling_hook": {
+      "conditions": {
+        "items": [
+          {
+            "items": "test1:stone_grappling_hook"
+          }
+        ]
+      },
+      "trigger": "minecraft:inventory_changed"
+    }
+  },
+  "display": {
+    "background": "minecraft:block/stone",
+    "description": {
+      "translate": "advancements.test1.root.description"
+    },
+    "icon": {
+      "count": 1,
+      "id": "test1:stone_grappling_hook"
+    },
+    "title": {
+      "translate": "advancements.test1.root.title"
+    }
+  },
+  "requirements": [
+    [
+      "has_stone_grappling_hook"
+    ]
+  ],
+  "sends_telemetry_event": true
+}
