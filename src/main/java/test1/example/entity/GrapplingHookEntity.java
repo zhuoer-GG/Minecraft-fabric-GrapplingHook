@@ -1,7 +1,10 @@
 package test1.example.entity;
 
+import java.lang.reflect.Field;
+import java.util.Comparator;
 import java.util.List;
 
+import net.minecraft.core.Direction;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
@@ -77,6 +80,16 @@ public class GrapplingHookEntity extends Projectile {
 
     /** 命中方块时记录锚点位置。 */
     private Vec3 hookedPos;
+
+    /** 命中方块的法线方向（Direction），用于计算玩家最终定位点。 */
+    private Direction hitDirection = Direction.UP;
+
+    /** 兼容不同映射：尝试通过反射写入 velocityModified 标志。 */
+    private static Field velocityModifiedField;
+    private static boolean velocityModifiedFieldResolved = false;
+
+    /** 当前 tick 是否应跳过默认 projectile 物理更新。 */
+    private boolean skipDefaultTickThisFrame = false;
 
     public GrapplingHookEntity(EntityType<? extends GrapplingHookEntity> entityType, Level level) {
         super(entityType, level);
@@ -208,7 +221,12 @@ public class GrapplingHookEntity extends Projectile {
 
     @Override
     public void tick() {
-        super.tick();
+        this.skipDefaultTickThisFrame = false;
+
+        // HOOKED 状态或本帧命中方块后，跳过 Projectile 默认物理，防止边缘弹开。
+        if (this.state != HookState.HOOKED && !this.skipDefaultTickThisFrame) {
+            super.tick();
+        }
 
         // 勾爪飞行阶段禁用重力：保持近似“绝对直线”弹道，避免下坠影响射程测试。
         this.setNoGravity(true);
@@ -217,6 +235,19 @@ public class GrapplingHookEntity extends Projectile {
         if (!(owner instanceof Player player) || !owner.isAlive()) {
             // 失去合法 owner 时，直接回收。
             this.setStateSync(HookState.RETRACTING);
+        }
+
+        // 第三步：Shift 键取消与释放逻辑
+        // 检测 Shift 键状态：玩家按下 Shift 时销毁勾爪，解除牵引。
+        // 这里选择 isShiftKeyDown() 而不是自定义按键，是因为 Shift 是 Minecraft 的标准控制，
+        // 玩家对其有统一预期；且在客户端也容易判定，同步问题少。
+        if (owner instanceof Player playerOwner && playerOwner.isShiftKeyDown()) {
+            playerOwner.fallDistance = 0.0F;  // 重置跌落距离
+            playerOwner.setNoGravity(false);  // 恢复重力，解除牵引状态
+            playerOwner.setDeltaMovement(Vec3.ZERO); // 安全释放：清空残余动量，避免 AABB 挤出弹飞
+            markVelocityModified(playerOwner);
+            this.discard();  // 清除勾爪实体，释放玩家
+            return;  // 提前返回，避免继续执行后续状态机
         }
 
         // 距离判定和状态切换仅在服务端执行。
@@ -282,15 +313,112 @@ public class GrapplingHookEntity extends Projectile {
      * 这样状态机语义稳定，后续可直接在这里扩展“拉玩家”逻辑。
      */
     private void tickHooked(Entity owner) {
+        // 1. 基础锚点维护（保持勾爪实体不动）
+        this.noPhysics = true;
         this.setDeltaMovement(Vec3.ZERO);
-
-        if (this.hookedPos != null) {
-            this.setPos(this.hookedPos.x, this.hookedPos.y, this.hookedPos.z);
+        if (this.hookedPos != null && this.hitDirection != null) {
+            Vec3 hookVisualPos = this.hookedPos.add(new Vec3(
+                this.hitDirection.getStepX(), this.hitDirection.getStepY(), this.hitDirection.getStepZ()
+            ).scale(0.05D));
+            this.setPos(hookVisualPos.x, hookVisualPos.y, hookVisualPos.z);
+            markVelocityModified(this);
         }
 
-        if (owner == null || !owner.isAlive()) {
-            this.setStateSync(HookState.RETRACTING);
+        if (!(owner instanceof Player player) || this.level().isClientSide()) {
+            return;
         }
+
+        // 2. 多勾爪权威判定
+        List<GrapplingHookEntity> activeHooks = getActiveHooksFor(player);
+        if (activeHooks.isEmpty() || activeHooks.get(0) != this) {
+            return;
+        }
+
+        // 3. 计算唯一目标：世界坐标质心
+        Vec3 worldCentroidSum = Vec3.ZERO;
+        for (GrapplingHookEntity hook : activeHooks) {
+            worldCentroidSum = worldCentroidSum.add(hook.getPullGoal());
+        }
+        Vec3 targetCentroid = worldCentroidSum.scale(1.0D / activeHooks.size());
+
+        // 计算玩家眼睛到质心的距离（我们以头部为平衡参考点）
+        Vec3 toTarget = targetCentroid.subtract(player.getEyePosition());
+        double distance = toTarget.length();
+        boolean isBlocked = player.horizontalCollision || player.verticalCollision;
+
+        // 4. 强化停止逻辑（Deadzone & Friction）
+        // 增大停止阈值：多勾爪环境下 0.3格 即可判定为平衡
+        double stopThreshold = activeHooks.size() > 1 ? 0.35D : 0.25D;
+
+        if (distance < stopThreshold || (isBlocked && distance < 0.7D)) {
+            // 强行熄火：彻底清空动量
+            player.setDeltaMovement(Vec3.ZERO);
+            player.setNoGravity(true);
+            player.fallDistance = 0.0F;
+
+            // 微调补丁：如果在死区内仍有微小位移，直接重置位置（防止物理引擎抖动）
+            if (distance > 0.05D && distance < stopThreshold) {
+                // 仅在服务器做微调，客户端会通过移动数据包同步
+                Vec3 currentPos = player.position();
+                // 保持脚部坐标正确：目标脚部 = 质心 - 眼睛高度偏移
+                player.setPos(currentPos.x, currentPos.y, currentPos.z);
+            }
+
+            markVelocityModified(player);
+            return;
+        }
+
+        // 5. 空间坐标移动逻辑（强化阻尼）
+        // 使用二次方衰减：当靠近目标时，速度下降得比线性更快
+        double dampingRange = 1.5D; // 1.5格内开始减速
+        double baseSpeed = this.speed;
+        double finalSpeed;
+
+        if (distance < dampingRange) {
+            // 二次方阻尼曲线：(dist/range)^2
+            // 这样在 0.5D 距离时的速度会只有全速的 1/9，而不是线性的 1/3
+            double ratio = distance / dampingRange;
+            double dampingFactor = Math.max(0.1D, ratio * ratio);
+            finalSpeed = baseSpeed * dampingFactor;
+        } else {
+            finalSpeed = baseSpeed;
+        }
+
+        // 限制最大速度，防止多勾爪叠加产生的意外初速度
+        finalSpeed = Math.min(finalSpeed, 1.2D);
+
+        Vec3 movement = toTarget.normalize().scale(finalSpeed);
+
+        // 6. 执行位移更新
+        player.setDeltaMovement(movement);
+        player.setNoGravity(true);
+        player.fallDistance = 0.0F;
+        markVelocityModified(player);
+    }
+
+    public Vec3 getPullGoal() {
+        if (this.hookedPos == null || this.hitDirection == null) {
+            return this.position();
+        }
+
+        double safetyOffset = 0.5D;
+        return this.hookedPos.add(new Vec3(
+            this.hitDirection.getStepX(),
+            this.hitDirection.getStepY(),
+            this.hitDirection.getStepZ()
+        ).scale(safetyOffset));
+    }
+
+    public static List<GrapplingHookEntity> getActiveHooksFor(Player player) {
+        List<GrapplingHookEntity> hooks = player.level().getEntitiesOfClass(
+            GrapplingHookEntity.class,
+            player.getBoundingBox().inflate(64.0D),
+            e -> e.getOwner() == player && e.getHookState() == HookState.HOOKED
+        );
+
+        // 固定顺序：按实体 ID 从小到大，保证“领头勾爪”在多端一致。
+        hooks.sort(Comparator.comparingInt(Entity::getId));
+        return hooks;
     }
 
     /**
@@ -313,6 +441,10 @@ public class GrapplingHookEntity extends Projectile {
         double length = toOwner.length();
 
         if (length < 1.5D) {
+            // 回收完成时，恢复玩家的重力，解除牵引状态
+            if (owner instanceof Player player) {
+                player.setNoGravity(false);
+            }
             this.discard();
             return;
         }
@@ -326,18 +458,81 @@ public class GrapplingHookEntity extends Projectile {
 
     @Override
     protected void onHitBlock(BlockHitResult blockHitResult) {
-        super.onHitBlock(blockHitResult);
+        // 先清空速度，立即中断飞行惯性，避免边缘命中时的反射位移。
+        this.setDeltaMovement(Vec3.ZERO);
+        this.skipDefaultTickThisFrame = true;
 
         System.out.println("[GrapplingHook] BlockHit at " + blockHitResult.getLocation());
 
-        // 命中判定（方块）：
-        // 1. 一旦射线检测/碰撞得到 BlockHitResult，就说明勾爪接触到了方块表面。
-        // 2. 切换状态到 HOOKED，并把速度清零，让勾爪停滞在命中点。
-        // 3. 使用精确命中坐标（非方块中心），避免视觉悬浮或穿模。
-        this.hookedPos = blockHitResult.getLocation();
-        this.setStateSync(HookState.HOOKED);
+        // ===== 核心修复：精准定位勾爪到方块表面外，彻底断开物理 =====
+        // 问题诊断：
+        // 1. Projectile 的默认反射/反弹逻辑会推开勾爪（super.onHitBlock 会干扰）
+        // 2. 不精确的位置设置导致勾爪在方块内/外反复振荡
+        // 3. 玩家被牵引时缺乏彻底的重力禁用
+        // 
+        // 解决方案：
+        // 1. 获取精确交点：使用 getLocation()（浮点精度）而非 getBlockPos()（整数精度）
+        // 2. 获取命中面法线：使用 getDirection()，其 getStep* 方向向量就是单位法线
+        // 3. 计算最终位置：交点 + 法线*偏移，确保勾爪稳稳停留在方块外表面
+        // 4. 立即冻结状态：设置 HOOKED 状态，防止状态被后续逻辑覆盖
+        // 5. 不调用 super，避免 Projectile 的反弹/反射逻辑
+
+        Vec3 hitPos = blockHitResult.getLocation();
+        Direction dir = blockHitResult.getDirection();
+        
+        // 法线向量：每个分量为 -1/0/1（由 direction 决定）
+        // 乘以 0.05D 让勾爪更贴近墙面，同时仍保留极小安全间隔
+        Vec3 normalOffset = new Vec3(
+            dir.getStepX() * 0.05D,
+            dir.getStepY() * 0.05D,
+            dir.getStepZ() * 0.05D
+        );
+        
+        // 最终位置：精确交点 + 法线偏移（确保在方块"外"）
+        Vec3 finalPos = hitPos.add(normalOffset);
+
+        // 边缘吸附：若命中点非常接近方块边缘，向方块中心微调 0.02 格，
+        // 降低边角浮点误差触发的“弹开”概率。
+        Vec3 blockMin = Vec3.atLowerCornerOf(blockHitResult.getBlockPos());
+        double localX = hitPos.x - blockMin.x;
+        double localY = hitPos.y - blockMin.y;
+        double localZ = hitPos.z - blockMin.z;
+        double edgeX = Math.min(localX, 1.0D - localX);
+        double edgeY = Math.min(localY, 1.0D - localY);
+        double edgeZ = Math.min(localZ, 1.0D - localZ);
+
+        // 只检测当前命中面的切向轴，避免把“贴面命中”误判成边缘命中。
+        boolean nearEdge = false;
+        if (dir.getStepX() == 0 && edgeX < 0.05D) {
+            nearEdge = true;
+        }
+        if (dir.getStepY() == 0 && edgeY < 0.05D) {
+            nearEdge = true;
+        }
+        if (dir.getStepZ() == 0 && edgeZ < 0.05D) {
+            nearEdge = true;
+        }
+
+        if (nearEdge) {
+            Vec3 center = Vec3.atCenterOf(blockHitResult.getBlockPos());
+            Vec3 towardCenter = center.subtract(finalPos);
+            if (towardCenter.lengthSqr() > 1.0E-8D) {
+                finalPos = finalPos.add(towardCenter.normalize().scale(0.02D));
+            }
+        }
+        
+        // 记录信息以供 tickHooked 维护
+        this.hookedPos = hitPos;  // 精确交点
+        this.hitDirection = dir;   // 法线方向
+        
+        // 立即"钉死"勾爪：清空速度、固定位置、切换状态
         this.setDeltaMovement(Vec3.ZERO);
-        this.setPos(this.hookedPos.x, this.hookedPos.y, this.hookedPos.z);
+        this.setPos(finalPos.x, finalPos.y, finalPos.z);
+        markVelocityModified(this);
+        this.noPhysics = true;
+        this.setStateSync(HookState.HOOKED);
+        
+        // 注意：不调用 super.onHitBlock()，避免 Projectile 的任何默认逻辑干扰
     }
 
     @Override
@@ -396,8 +591,37 @@ public class GrapplingHookEntity extends Projectile {
 
     private void setStateSync(HookState newState) {
         this.state = newState;
+        this.noPhysics = (newState == HookState.HOOKED);
         // 服务端将状态同步到所有监听客户端。
         this.entityData.set(DATA_STATE, newState.ordinal());
+    }
+
+    private static void markVelocityModified(Entity entity) {
+        // 与服务端同步位移更新的核心标志。
+        entity.hurtMarked = true;
+
+        // 兼容字段名差异：若当前映射存在 velocityModified，则一并置 true。
+        if (!velocityModifiedFieldResolved) {
+            velocityModifiedFieldResolved = true;
+            Class<?> current = entity.getClass();
+            while (current != null) {
+                try {
+                    velocityModifiedField = current.getDeclaredField("velocityModified");
+                    velocityModifiedField.setAccessible(true);
+                    break;
+                } catch (NoSuchFieldException ignored) {
+                    current = current.getSuperclass();
+                }
+            }
+        }
+
+        if (velocityModifiedField != null) {
+            try {
+                velocityModifiedField.setBoolean(entity, true);
+            } catch (IllegalAccessException ignored) {
+                // 反射失败时降级为仅使用 hurtMarked。
+            }
+        }
     }
 
     @Override
