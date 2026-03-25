@@ -347,10 +347,13 @@ public class GrapplingHookEntity extends Projectile {
         boolean isBlocked = player.horizontalCollision || player.verticalCollision;
 
         // 4. 强化停止逻辑（Deadzone & Friction）
-        // 增大停止阈值：多勾爪环境下 0.3格 即可判定为平衡
-        double stopThreshold = activeHooks.size() > 1 ? 0.35D : 0.25D;
+        // 速度越高，死区越大，避免高速靠近目标时反复横跳。
+        double speedScale = Mth.clamp(this.speed / 0.8D, 1.0D, 2.5D);
+        double stopThresholdBase = activeHooks.size() > 1 ? 0.35D : 0.25D;
+        double stopThreshold = stopThresholdBase + 0.05D * (speedScale - 1.0D);
+        double blockedThreshold = 0.7D + 0.10D * (speedScale - 1.0D);
 
-        if (distance < stopThreshold || (isBlocked && distance < 0.7D)) {
+        if (distance < stopThreshold || (isBlocked && distance < blockedThreshold)) {
             // 强行熄火：彻底清空动量
             player.setDeltaMovement(Vec3.ZERO);
             player.setNoGravity(true);
@@ -369,23 +372,25 @@ public class GrapplingHookEntity extends Projectile {
         }
 
         // 5. 空间坐标移动逻辑（强化阻尼）
-        // 使用二次方衰减：当靠近目标时，速度下降得比线性更快
-        double dampingRange = 1.5D; // 1.5格内开始减速
+        // 按速度自适应阻尼范围和衰减强度，自动适配更高档位勾爪。
+        double dampingRange = 1.5D + 0.5D * (speedScale - 1.0D);
         double baseSpeed = this.speed;
         double finalSpeed;
 
         if (distance < dampingRange) {
-            // 二次方阻尼曲线：(dist/range)^2
-            // 这样在 0.5D 距离时的速度会只有全速的 1/9，而不是线性的 1/3
+            // 幂次阻尼曲线：速度越高，幂次越大，近距离减速越激进。
             double ratio = distance / dampingRange;
-            double dampingFactor = Math.max(0.1D, ratio * ratio);
+            double dampingPower = 2.0D + 0.8D * (speedScale - 1.0D);
+            double dampingFactor = Math.max(0.08D, Math.pow(ratio, dampingPower));
             finalSpeed = baseSpeed * dampingFactor;
         } else {
             finalSpeed = baseSpeed;
         }
 
-        // 限制最大速度，防止多勾爪叠加产生的意外初速度
-        finalSpeed = Math.min(finalSpeed, 1.2D);
+        // 限制最大速度，防止多勾爪叠加产生的意外初速度。
+        // 允许随档位略增长，但上限控制在稳定区间。
+        double maxPullSpeed = 1.2D + 0.15D * (speedScale - 1.0D);
+        finalSpeed = Math.min(finalSpeed, maxPullSpeed);
 
         Vec3 movement = toTarget.normalize().scale(finalSpeed);
 
